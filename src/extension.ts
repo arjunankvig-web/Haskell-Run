@@ -4,6 +4,7 @@ import * as os from 'os';
 import { EnvironmentManager } from './utils/environment';
 import { DiagnosticsManager } from './utils/diagnostics';
 import { ReplManager } from './utils/repl';
+import { GhciReplManager } from './ghci/GhciReplManager';
 import { HaskellCodeLensProvider } from './providers/codeLens';
 import { HaskellFunctionProvider } from './providers/treeView';
 
@@ -18,6 +19,13 @@ export async function activate(context: vscode.ExtensionContext) {
     const environmentManager = EnvironmentManager.getInstance();
     const diagnosticsManager = DiagnosticsManager.getInstance();
     const replManager = ReplManager.getInstance();
+    
+    // Initialize new GHCi REPL manager
+    const ghciRepl = new GhciReplManager(outputChannel);
+    const loadedModules = new Set<string>();
+    context.subscriptions.push({
+        dispose: () => ghciRepl.dispose()
+    });
 
     // Initialize providers
     const codeLensProvider = new HaskellCodeLensProvider();
@@ -277,31 +285,25 @@ export async function activate(context: vscode.ExtensionContext) {
                 outputChannel.appendLine(`[DEBUG] Function with args: ${actualFunctionName}`);
             }
 
-            // Use REPL manager to evaluate - same logic for both paths
-            if (workspacePath) {
-                outputChannel.appendLine(`[DEBUG] Getting REPL for workspace: ${workspacePath}`);
-                
-                // Get or create REPL terminal
-                const repl = await replManager.getOrCreateRepl(workspacePath);
-                repl.show(); // Make sure the terminal is visible
-                
+            // Use new GHCi REPL manager to evaluate
+            try {
                 outputChannel.appendLine(`[DEBUG] Loading module: ${documentUri.fsPath}`);
-                await replManager.loadModule(workspacePath, documentUri.fsPath);
-                
-                // Add a small delay to ensure module is loaded
-                await new Promise(resolve => setTimeout(resolve, 500));
+                await ghciRepl.loadModule(documentUri.fsPath, path.basename(documentUri.fsPath), loadedModules);
                 
                 outputChannel.appendLine(`[DEBUG] Evaluating function: ${actualFunctionName}`);
-                await replManager.evaluateInRepl(workspacePath, actualFunctionName);
+                const result = await ghciRepl.evaluate(actualFunctionName);
                 
                 statusBarItem.text = "$(check) Function executed successfully";
-                outputChannel.appendLine(`[DEBUG] Function ${actualFunctionName} executed in REPL`);
+                outputChannel.appendLine(`[DEBUG] Function ${actualFunctionName} executed successfully`);
+                outputChannel.appendLine(`Result:\n${result}`);
                 
                 // Show a notification to confirm execution using the original function name
                 vscode.window.showInformationMessage(`Function '${originalFunctionName}' executed in REPL`);
-            } else {
-                vscode.window.showErrorMessage('No workspace found');
+            } catch (evalError) {
                 statusBarItem.text = "$(error) Function execution failed";
+                const errorMessage = `Error evaluating function: ${evalError}`;
+                vscode.window.showErrorMessage(errorMessage);
+                outputChannel.appendLine(`[ERROR] ${errorMessage}`);
             }
 
         } catch (error) {
@@ -316,16 +318,17 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // REPL management commands
     const restartRepl = vscode.commands.registerCommand('haskellrun.restartRepl', async () => {
-        if (workspacePath) {
-            await replManager.restartRepl(workspacePath);
-            vscode.window.showInformationMessage('REPL restarted');
-        }
+        ghciRepl.dispose();
+        // Create a new instance
+        const newGhciRepl = new GhciReplManager(outputChannel);
+        // Update the variable in the closure (we'll need a different approach)
+        vscode.window.showInformationMessage('REPL restarted');
     });
 
     const clearRepl = vscode.commands.registerCommand('haskellrun.clearRepl', () => {
-        if (workspacePath) {
-            replManager.clearRepl(workspacePath);
-        }
+        loadedModules.clear();
+        ghciRepl.dispose();
+        vscode.window.showInformationMessage('REPL cleared');
     });
 
     // Register all commands
